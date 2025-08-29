@@ -13,6 +13,7 @@ const (
 	DbMySQL    = "mysql"
 	DbPostgres = "postgres"
 	DbSqlite   = "sqlite"
+	DbLibSQL   = "libsql"
 )
 
 type connectionFn func(dsn string) (*gorm.DB, error)
@@ -134,7 +135,7 @@ func (m *ConnectionManager) FlushAllTables(name string) error {
 	}
 
 	switch config.DriverName {
-	case DbSqlite:
+	case DbSqlite, DbLibSQL:
 		return FlushSQLiteTables(db)
 	case DbMySQL:
 		return FlushMySQLTables(db)
@@ -160,7 +161,7 @@ func (m *ConnectionManager) DropAllTables(name string) error {
 	}
 
 	switch config.DriverName {
-	case DbSqlite:
+	case DbSqlite, DbLibSQL:
 		return DropSQLiteTables(db)
 	case DbMySQL:
 		return DropMySQLTables(db)
