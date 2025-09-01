@@ -252,12 +252,7 @@ var (
 // GetManager returns the singleton instance of ConnectionManager
 func GetManager() *ConnectionManager {
 	once.Do(func() {
-		instance = &ConnectionManager{
-			connections:        make(map[string]*gorm.DB),
-			mu:                 sync.RWMutex{},
-			executedMigrations: make(map[string]struct{}),
-			migrationMu:        sync.RWMutex{},
-		}
+		instance = NewConnectionManager()
 	})
 	return instance
 }
@@ -265,6 +260,8 @@ func GetManager() *ConnectionManager {
 // NewConnectionManager creates a new ConnectionManager instance (for testing or when singleton is not needed)
 func NewConnectionManager() *ConnectionManager {
 	return &ConnectionManager{
+		connConfigs:        make(map[string]connDsn),
+		connectionFns:      make(map[string]connectionFn),
 		connections:        make(map[string]*gorm.DB),
 		mu:                 sync.RWMutex{},
 		executedMigrations: make(map[string]struct{}),
