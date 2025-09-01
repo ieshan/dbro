@@ -71,7 +71,7 @@ func (m *ConnectionManager) GetConnection(name string) (*gorm.DB, error) {
 
 	if exists && err != nil {
 		_ = m.Close(name)
-		return nil, err
+		exists = false
 	}
 
 	if !exists {
