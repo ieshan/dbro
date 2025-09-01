@@ -61,7 +61,18 @@ func (m *ConnectionManager) GetConnection(name string) (*gorm.DB, error) {
 		return nil, fmt.Errorf("database connection function not found for driver %s", config.DriverName)
 	}
 	conn, exists := m.connections[name]
+	if exists {
+		sqlDB, err := conn.DB()
+		if err == nil {
+			err = sqlDB.Ping()
+		}
+	}
 	m.mu.RUnlock()
+
+	if exists && err != nil {
+		_ = m.Close(name)
+		return nil, err
+	}
 
 	if !exists {
 		// Need to create a new connection state
@@ -198,20 +209,17 @@ func (m *ConnectionManager) RunMigration(name, filePath string) error {
 		return fmt.Errorf("no valid SQL statements found in file %s", filePath)
 	}
 
-	// Execute statements in a transaction for atomicity
-	return db.Transaction(func(tx *gorm.DB) error {
-		for i, statement := range statements {
-			statement = strings.TrimSpace(statement)
-			if statement == "" {
-				continue // Skip empty statements
-			}
-
-			if err := tx.Exec(statement).Error; err != nil {
-				return fmt.Errorf("failed to execute statement %d in file %s: %w\nStatement: %s", i+1, filePath, err, statement)
-			}
+	for i, statement := range statements {
+		statement = strings.TrimSpace(statement)
+		if statement == "" {
+			continue // Skip empty statements
 		}
-		return nil
-	})
+
+		if err := db.Exec(statement).Error; err != nil {
+			return fmt.Errorf("failed to execute statement %d in file %s: %w\nStatement: %s", i+1, filePath, err, statement)
+		}
+	}
+	return nil
 }
 
 // RunMigrationOnce loads and executes SQL migration file only once for the given combination
