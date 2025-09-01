@@ -62,9 +62,11 @@ func (m *ConnectionManager) GetConnection(name string) (*gorm.DB, error) {
 	}
 	conn, exists := m.connections[name]
 	if exists {
-		sqlDB, err := conn.DB()
-		if err == nil {
+		sqlDB, rootErr := conn.DB()
+		if rootErr == nil {
 			err = sqlDB.Ping()
+		} else {
+			err = rootErr
 		}
 	}
 	m.mu.RUnlock()
