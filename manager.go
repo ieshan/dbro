@@ -46,6 +46,17 @@ func (m *ConnectionManager) SetDsn(name, driverName, dsn string) {
 	}
 }
 
+// driverNameFor returns the driver name for a configured connection name.
+func (m *ConnectionManager) driverNameFor(name string) (string, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	cfg, ok := m.connConfigs[name]
+	if !ok {
+		return "", fmt.Errorf("database connection config not found for %s", name)
+	}
+	return cfg.DriverName, nil
+}
+
 func (m *ConnectionManager) GetConnection(name string) (*gorm.DB, error) {
 	var err error
 
@@ -206,7 +217,7 @@ func (m *ConnectionManager) RunMigration(name, filePath string) error {
 	}
 
 	// Split SQL content into individual statements
-	statements := splitSQLStatements(sqlString)
+	statements := splitSQLStatements(sqlString, false)
 	if len(statements) == 0 {
 		return fmt.Errorf("no valid SQL statements found in file %s", filePath)
 	}
@@ -217,7 +228,7 @@ func (m *ConnectionManager) RunMigration(name, filePath string) error {
 			continue // Skip empty statements
 		}
 
-		if err := db.Exec(statement).Error; err != nil {
+		if err = db.Exec(statement).Error; err != nil {
 			return fmt.Errorf("failed to execute statement %d in file %s: %w\nStatement: %s", i+1, filePath, err, statement)
 		}
 	}
@@ -242,7 +253,7 @@ func (m *ConnectionManager) RunMigrationOnce(name, filePath string) error {
 	m.migrationMu.Lock()
 	defer m.migrationMu.Unlock()
 
-	if _, exists := m.executedMigrations[migrationKey]; exists {
+	if _, exists = m.executedMigrations[migrationKey]; exists {
 		return nil
 	}
 

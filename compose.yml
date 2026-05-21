@@ -1,0 +1,52 @@
+services:
+  postgres:
+    image: postgres:18.4-alpine3.23
+    environment:
+      POSTGRES_USER: dbro
+      POSTGRES_PASSWORD: dbro
+      POSTGRES_DB: dbro_test
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dbro -d dbro_test"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  mysql:
+    image: mysql:9.7.0
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: dbro_test
+      MYSQL_USER: dbro
+      MYSQL_PASSWORD: dbro
+    ports:
+      - "3306:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "dbro", "-pdbro"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - mysqldata:/var/lib/mysql
+
+  test:
+    image: golang:1.26.3
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+    environment:
+      - DBRO_POSTGRES_DSN=host=postgres user=dbro password=dbro dbname=dbro_test port=5432 sslmode=disable
+      - DBRO_MYSQL_DSN=dbro:dbro@tcp(mysql:3306)/dbro_test?parseTime=true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+    command: ["sh", "-c", "go test -v ./... && cd tests && go test -v ./..."]
+
+volumes:
+  pgdata:
+  mysqldata:
