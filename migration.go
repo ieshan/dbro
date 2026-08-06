@@ -44,9 +44,10 @@ func ParseMigration(sqlContent string) (*ParsedMigration, error) {
 		if s == "" {
 			return
 		}
-		if currentBlock == stateUp {
+		switch currentBlock {
+		case stateUp:
 			result.UpStatements = append(result.UpStatements, s)
-		} else if currentBlock == stateDown {
+		case stateDown:
 			result.DownStatements = append(result.DownStatements, s)
 		}
 		currentStmt.Reset()

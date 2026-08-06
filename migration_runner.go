@@ -75,7 +75,7 @@ func (m *ConnectionManager) migrateUpLocked(ctx context.Context, name, filePath 
 		return fmt.Errorf("ensure migrations table: %w", err)
 	}
 
-	content, err := os.ReadFile(filePath)
+	content, err := os.ReadFile(filePath) // #nosec G304 -- filePath is a user-provided migration path, file read is intended behavior
 	if err != nil {
 		return fmt.Errorf("read migration file %s: %w", filePath, err)
 	}
@@ -138,7 +138,7 @@ func (m *ConnectionManager) migrateDownLocked(ctx context.Context, name, filePat
 		return fmt.Errorf("ensure migrations table: %w", err)
 	}
 
-	content, err := os.ReadFile(filePath)
+	content, err := os.ReadFile(filePath) // #nosec G304 -- filePath is a user-provided migration path, file read is intended behavior
 	if err != nil {
 		return fmt.Errorf("read migration file %s: %w", filePath, err)
 	}
@@ -260,7 +260,7 @@ func (m *ConnectionManager) migrateDirLocked(ctx context.Context, name, dirPath 
 		version time.Time
 		path    string
 	}
-	var files []migrationFile
+	files := make([]migrationFile, 0, len(entries))
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
 			continue
@@ -290,8 +290,8 @@ func (m *ConnectionManager) migrateDirLocked(ctx context.Context, name, dirPath 
 		}
 	}
 
-	switch {
-	case targetVersion == "":
+	switch targetVersion {
+	case "":
 		for _, f := range files {
 			if !appliedSet[f.version] {
 				if err := m.migrateUpLocked(ctx, name, f.path); err != nil {
@@ -300,7 +300,7 @@ func (m *ConnectionManager) migrateDirLocked(ctx context.Context, name, dirPath 
 			}
 		}
 
-	case targetVersion == "zero":
+	case "zero":
 		for i := len(files) - 1; i >= 0; i-- {
 			if appliedSet[files[i].version] {
 				if err := m.migrateDownLocked(ctx, name, files[i].path); err != nil {

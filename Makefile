@@ -1,4 +1,4 @@
-.PHONY: setup test vet fmt build down
+.PHONY: setup test test-race vet fmt lint build down
 
 setup:
 	@if [ ! -f go.work ]; then \
@@ -11,6 +11,14 @@ setup:
 
 test:
 	docker compose run --rm test
+
+test-race:
+	go test -race ./...
+	cd tests && go test -race ./...
+
+lint:
+	golangci-lint run ./...
+	cd tests && golangci-lint run ./...
 
 vet:
 	go vet ./...

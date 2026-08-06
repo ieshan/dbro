@@ -210,7 +210,7 @@ func (m *ConnectionManager) RunMigration(name, filePath string) error {
 	}
 
 	// Read SQL file
-	sqlContent, err := os.ReadFile(filePath)
+	sqlContent, err := os.ReadFile(filePath) // #nosec G304 -- filePath is a user-provided migration path, file read is intended behavior
 	if err != nil {
 		return fmt.Errorf("failed to read SQL file %s: %w", filePath, err)
 	}

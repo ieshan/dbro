@@ -45,17 +45,17 @@ func (l *postgresLock) Lock(ctx context.Context) error {
 	deadline := time.Now().Add(l.timeout)
 	for {
 		if ctx.Err() != nil {
-			conn.Close()
+			_ = conn.Close()
 			return ctx.Err()
 		}
 		if time.Now().After(deadline) {
-			conn.Close()
+			_ = conn.Close()
 			return fmt.Errorf("pg_try_advisory_lock: %w", ErrLockTimeout)
 		}
 		var locked bool
 		err := conn.QueryRowContext(ctx, "SELECT pg_try_advisory_lock($1)", l.lockID).Scan(&locked)
 		if err != nil {
-			conn.Close()
+			_ = conn.Close()
 			return fmt.Errorf("pg_try_advisory_lock: %w", err)
 		}
 		if locked {
@@ -64,7 +64,7 @@ func (l *postgresLock) Lock(ctx context.Context) error {
 		}
 		select {
 		case <-ctx.Done():
-			conn.Close()
+			_ = conn.Close()
 			return ctx.Err()
 		case <-time.After(l.pollInterval):
 		}
@@ -102,11 +102,11 @@ func (l *mysqlLock) Lock(ctx context.Context) error {
 	var result sql.NullInt64
 	err = conn.QueryRowContext(ctx, "SELECT GET_LOCK(?, ?)", l.lockName, l.timeoutSec).Scan(&result)
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return fmt.Errorf("GET_LOCK: %w", err)
 	}
 	if !result.Valid || result.Int64 != 1 {
-		conn.Close()
+		_ = conn.Close()
 		return fmt.Errorf("GET_LOCK: %w", ErrLockTimeout)
 	}
 	l.conn = conn
