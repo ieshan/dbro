@@ -5,6 +5,8 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"gorm.io/gorm"
 )
@@ -31,6 +33,9 @@ type ConnectionManager struct {
 	// Migration tracking for RunMigrationOnce
 	executedMigrations map[string]struct{}
 	migrationMu        sync.RWMutex
+	// Database-level migration locking
+	lockTimeout time.Duration // guarded by mu
+	lockEnabled atomic.Bool   // safe for concurrent read/write without mu
 }
 
 func (m *ConnectionManager) AddConnectionFunc(driverName string, f connectionFn) {
@@ -280,12 +285,30 @@ func GetManager() *ConnectionManager {
 
 // NewConnectionManager creates a new ConnectionManager instance (for testing or when singleton is not needed)
 func NewConnectionManager() *ConnectionManager {
-	return &ConnectionManager{
+	cm := &ConnectionManager{
 		connConfigs:        make(map[string]connDsn),
 		connectionFns:      make(map[string]connectionFn),
 		connections:        make(map[string]*gorm.DB),
 		mu:                 sync.RWMutex{},
 		executedMigrations: make(map[string]struct{}),
 		migrationMu:        sync.RWMutex{},
+		lockTimeout:        30 * time.Second,
 	}
+	cm.lockEnabled.Store(true)
+	return cm
+}
+
+// SetLockTimeout configures how long to wait for a database lock before failing.
+// Default is 30 seconds. Must be called before concurrent migration runs begin.
+func (m *ConnectionManager) SetLockTimeout(d time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.lockTimeout = d
+}
+
+// SetLockingEnabled enables or disables database-level migration locking.
+// Locking is enabled by default. Disable for testing or single-process environments
+// where the in-process mutex is sufficient. Safe to call concurrently.
+func (m *ConnectionManager) SetLockingEnabled(enabled bool) {
+	m.lockEnabled.Store(enabled)
 }

@@ -2,10 +2,13 @@ package dbro_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/ieshan/dbro"
 	"gorm.io/driver/sqlite"
@@ -332,7 +335,7 @@ DROP TABLE b;`)
 	// all user tables should be gone
 	db, _ := m.GetConnection("default")
 	var tables []string
-	db.Raw("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name != 'dbro_migrations'").Scan(&tables)
+	db.Raw("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT IN ('dbro_migrations', 'dbro_migration_lock')").Scan(&tables)
 	if len(tables) > 0 {
 		t.Fatalf("expected no user tables, got %v", tables)
 	}
@@ -445,5 +448,111 @@ func writeFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		t.Fatalf("failed to write file: %v", err)
+	}
+}
+
+func TestMigrateUp_LockingBlocksSecondCall_SQLite(t *testing.T) {
+	m := newSQLiteManager(t)
+	m.SetLockTimeout(500 * time.Millisecond)
+	ctx := context.Background()
+
+	// Manually hold the lock by inserting a sentinel row into the lock table.
+	// This deterministically simulates a concurrent process holding the lock.
+	db, _ := m.GetConnection("default")
+	db.Exec("CREATE TABLE IF NOT EXISTS dbro_migration_lock (id INTEGER PRIMARY KEY)")
+	db.Exec("INSERT INTO dbro_migration_lock (id) VALUES (1)")
+
+	f := writeTempSQL(t, "2026-05-19-22-00-create-users.sql", `-- migrate:up
+CREATE TABLE users (id INT PRIMARY KEY);`)
+
+	err := m.MigrateUp(ctx, "default", f)
+	if err == nil {
+		t.Fatal("expected lock timeout error")
+	}
+	if !errors.Is(err, dbro.ErrLockTimeout) {
+		t.Fatalf("expected ErrLockTimeout, got: %v", err)
+	}
+
+	// Release the lock and verify migration succeeds
+	db.Exec("DELETE FROM dbro_migration_lock WHERE id = 1")
+	if err := m.MigrateUp(ctx, "default", f); err != nil {
+		t.Fatalf("expected success after lock release, got: %v", err)
+	}
+}
+
+func TestMigrateDir_LockingSerializesConcurrentRuns_SQLite(t *testing.T) {
+	m := newSQLiteManager(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "2026-05-19-22-00-a.sql"), `-- migrate:up
+CREATE TABLE a (id INT PRIMARY KEY);`)
+	writeFile(t, filepath.Join(dir, "2026-05-19-22-01-b.sql"), `-- migrate:up
+CREATE TABLE b (id INT PRIMARY KEY);`)
+	writeFile(t, filepath.Join(dir, "2026-05-19-22-02-c.sql"), `-- migrate:up
+CREATE TABLE c (id INT PRIMARY KEY);`)
+
+	var wg sync.WaitGroup
+	var err1, err2 error
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		err1 = m.MigrateDir(ctx, "default", dir, "")
+	}()
+	go func() {
+		defer wg.Done()
+		err2 = m.MigrateDir(ctx, "default", dir, "")
+	}()
+	wg.Wait()
+
+	if err1 != nil {
+		t.Fatalf("first MigrateDir failed: %v", err1)
+	}
+	if err2 != nil {
+		t.Fatalf("second MigrateDir failed: %v", err2)
+	}
+
+	// Verify no duplicate migration records
+	db, _ := m.GetConnection("default")
+	var count int
+	db.Raw("SELECT count(*) FROM dbro_migrations").Scan(&count)
+	if count != 3 {
+		t.Fatalf("expected 3 migration records, got %d", count)
+	}
+}
+
+func TestMigrateUp_LockingDisabled_WorksWithoutLock_SQLite(t *testing.T) {
+	m := newSQLiteManager(t)
+	m.SetLockingEnabled(false)
+	ctx := context.Background()
+	f := writeTempSQL(t, "2026-05-19-22-00-create-users.sql", `-- migrate:up
+CREATE TABLE users (id INT PRIMARY KEY);`)
+	if err := m.MigrateUp(ctx, "default", f); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestMigrateUp_LockReleasedOnContextCancel_SQLite(t *testing.T) {
+	m := newSQLiteManager(t)
+	ctx := context.Background()
+
+	// Migration A includes a slow recursive CTE that keeps the migration running
+	// long enough for the context timeout to fire mid-migration.
+	fA := writeTempSQL(t, "2026-05-19-22-00-slow.sql", `-- migrate:up
+CREATE TABLE slow_a (id INT PRIMARY KEY);
+WITH RECURSIVE cnt(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM cnt WHERE x < 10000000) SELECT count(*) FROM cnt;`)
+
+	fB := writeTempSQL(t, "2026-05-19-22-01-b.sql", `-- migrate:up
+CREATE TABLE b (id INT PRIMARY KEY);`)
+
+	// Short timeout: lock will be acquired, but migration will be interrupted.
+	ctxA, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	defer cancel()
+
+	_ = m.MigrateUp(ctxA, "default", fA)
+
+	// Lock should be released via context.WithoutCancel in the defer.
+	// The second MigrateUp with a fresh context must succeed.
+	if err := m.MigrateUp(ctx, "default", fB); err != nil {
+		t.Fatalf("second MigrateUp should succeed after lock release, got: %v", err)
 	}
 }

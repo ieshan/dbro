@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:18.4-alpine3.23
+    image: postgres:18.4-alpine3.24
     environment:
       POSTGRES_USER: dbro
       POSTGRES_PASSWORD: dbro
@@ -12,11 +12,9 @@ services:
       interval: 2s
       timeout: 5s
       retries: 10
-    volumes:
-      - pgdata:/var/lib/postgresql/data
 
   mysql:
-    image: mysql:9.7.0
+    image: mysql:9.7.2
     environment:
       MYSQL_ROOT_PASSWORD: root
       MYSQL_DATABASE: dbro_test
@@ -29,8 +27,6 @@ services:
       interval: 2s
       timeout: 5s
       retries: 10
-    volumes:
-      - mysqldata:/var/lib/mysql
 
   test:
     image: golang:1.26.3
@@ -46,7 +42,3 @@ services:
       mysql:
         condition: service_healthy
     command: ["sh", "-c", "go test -v ./... && cd tests && go test -v ./..."]
-
-volumes:
-  pgdata:
-  mysqldata:

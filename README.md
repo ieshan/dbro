@@ -195,6 +195,47 @@ Examples:
 
 You can still force `transaction:true` for DML-only migrations on MySQL.
 
+## Concurrent Safety
+
+dbro provides database-level locking to prevent concurrent migration runners from
+racing on the same database. Locking is **enabled by default**.
+
+### How It Works
+
+| Dialect | Lock mechanism | Scope |
+|---------|---------------|-------|
+| PostgreSQL | `pg_try_advisory_lock` with retry loop | Session (dedicated connection) |
+| MySQL | `GET_LOCK` / `RELEASE_LOCK` | Session (dedicated connection) |
+| SQLite/LibSQL | Table-based lock (`dbro_migration_lock` table) | Database (table row) |
+
+### Configuration
+
+```go
+m := dbro.NewConnectionManager()
+
+// Set lock timeout (default: 30s)
+m.SetLockTimeout(60 * time.Second)
+
+// Disable locking (e.g., for testing or single-process environments)
+m.SetLockingEnabled(false)
+```
+
+### Important Notes
+
+- **PostgreSQL/MySQL**: A dedicated connection is pinned from the pool for the
+  duration of the lock. Ensure `MaxOpenConns >= 2` when locking is enabled
+  (default). If `MaxOpenConns == 1`, dbro returns an error to prevent a deadlock.
+- **SQLite**: Uses a table-based lock (`dbro_migration_lock` table). The table is
+  created automatically on first use. If a process is killed while holding the lock,
+  the row must be manually deleted (known limitation of table-based locks).
+- **Context cancellation**: Locks are always released, even if the context is
+  cancelled. The unlock operation uses `context.WithoutCancel` internally.
+- **Error handling**: Lock timeout errors can be inspected with `errors.Is(err, dbro.ErrLockTimeout)`.
+  If both migration and unlock fail, errors are joined via `errors.Join`.
+- **`Once` variants**: `MigrateUpOnce`, `MigrateDownOnce`, and `MigrateDirOnce`
+  provide both in-process protection (via mutex) and cross-process protection
+  (via database lock).
+
 ## Legacy Compatibility
 
 The original `RunMigration` and `RunMigrationOnce` methods are preserved and continue to split SQL by semicolons:

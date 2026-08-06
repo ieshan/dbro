@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ieshan/dbro"
 	"gorm.io/driver/mysql"
@@ -109,23 +110,24 @@ CREATE TABLE t2 (id INT PRIMARY KEY);`)
 func TestIntegration_Postgres_TransactionTrue_Rollback(t *testing.T) {
 	m := newPostgresManager(t)
 	ctx := context.Background()
-	f := writeTempSQL(t, "2026-05-19-22-00-tx-fail.sql", `-- migrate:up transaction:true
-CREATE TABLE t1 (id INT PRIMARY KEY);
-CREATE TABEL t2 (id INT PRIMARY KEY);`)
+	f := writeTempSQL(t, "2026-05-19-22-05-tx-fail.sql", `-- migrate:up transaction:true
+CREATE TABLE t3 (id INT PRIMARY KEY);
+CREATE TABEL t4 (id INT PRIMARY KEY);`)
 	err := m.MigrateUp(ctx, "default", f)
 	if err == nil {
 		t.Fatal("expected error for invalid SQL in transaction")
 	}
 	db, _ := m.GetConnection("default")
 	var name string
-	db.Raw("SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = 't1'").Scan(&name)
+	db.Raw("SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = 't3'").Scan(&name)
 	if name != "" {
-		t.Fatal("expected t1 to be rolled back")
+		t.Fatal("expected t3 to be rolled back")
 	}
 }
 
 func TestIntegration_Postgres_ConcurrentApply(t *testing.T) {
-	m := newPostgresManager(t)
+	m1 := newPostgresManager(t)
+	m2 := newPostgresManager(t)
 	ctx := context.Background()
 	f := writeTempSQL(t, "2026-05-19-22-00-concurrent.sql", `-- migrate:up
 CREATE TABLE concurrent (id INT PRIMARY KEY);`)
@@ -135,18 +137,15 @@ CREATE TABLE concurrent (id INT PRIMARY KEY);`)
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		err1 = m.MigrateUpOnce(ctx, "default", f)
+		err1 = m1.MigrateUp(ctx, "default", f)
 	}()
 	go func() {
 		defer wg.Done()
-		err2 = m.MigrateUpOnce(ctx, "default", f)
+		err2 = m2.MigrateUp(ctx, "default", f)
 	}()
 	wg.Wait()
 	if err1 != nil && err2 != nil {
-		t.Fatalf("both goroutines failed: %v, %v", err1, err2)
-	}
-	if err1 == nil && err2 == nil {
-		// both succeeding is also acceptable if the race resolves
+		t.Fatalf("both managers failed: %v, %v", err1, err2)
 	}
 }
 
@@ -203,6 +202,109 @@ SELECT 1;`)
 	db.Raw("SELECT data_type FROM information_schema.columns WHERE table_name = 'dbro_migrations' AND column_name = 'id'").Scan(&colType)
 	if colType != "timestamp" {
 		t.Fatalf("expected id column type timestamp, got %q", colType)
+	}
+}
+
+func TestIntegration_Postgres_ConcurrentMigrateDir_Serializes(t *testing.T) {
+	m1 := newPostgresManager(t)
+	m2 := newPostgresManager(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "2026-05-19-22-00-a.sql"), `-- migrate:up
+CREATE TABLE a (id INT PRIMARY KEY);`)
+	writeFile(t, filepath.Join(dir, "2026-05-19-22-01-b.sql"), `-- migrate:up
+CREATE TABLE b (id INT PRIMARY KEY);`)
+	writeFile(t, filepath.Join(dir, "2026-05-19-22-02-c.sql"), `-- migrate:up
+CREATE TABLE c (id INT PRIMARY KEY);`)
+
+	var wg sync.WaitGroup
+	var err1, err2 error
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		err1 = m1.MigrateDir(ctx, "default", dir, "")
+	}()
+	go func() {
+		defer wg.Done()
+		err2 = m2.MigrateDir(ctx, "default", dir, "")
+	}()
+	wg.Wait()
+	if err1 != nil {
+		t.Fatalf("first MigrateDir failed: %v", err1)
+	}
+	if err2 != nil {
+		t.Fatalf("second MigrateDir failed: %v", err2)
+	}
+
+	// Verify no duplicate migration records
+	db, _ := m1.GetConnection("default")
+	var count int
+	db.Raw("SELECT count(*) FROM dbro_migrations").Scan(&count)
+	if count != 3 {
+		t.Fatalf("expected 3 migration records, got %d", count)
+	}
+}
+
+func TestIntegration_Postgres_LockReleasedOnContextCancel(t *testing.T) {
+	mA := newPostgresManager(t)
+	mB := newPostgresManager(t)
+	ctx := context.Background()
+
+	fA := writeTempSQL(t, "2026-05-19-22-00-slow.sql", `-- migrate:up
+CREATE TABLE slow_a (id INT PRIMARY KEY);
+SELECT pg_sleep(2);`)
+
+	fB := writeTempSQL(t, "2026-05-19-22-01-b.sql", `-- migrate:up
+CREATE TABLE b (id INT PRIMARY KEY);`)
+
+	ctxA, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	defer cancel()
+	_ = mA.MigrateUp(ctxA, "default", fA)
+
+	// Lock should be released via context.WithoutCancel in the defer.
+	// Manager B (separate instance, same DSN) must be able to acquire the lock.
+	if err := mB.MigrateUp(ctx, "default", fB); err != nil {
+		t.Fatalf("manager B should succeed after lock release, got: %v", err)
+	}
+}
+
+func TestIntegration_MySQL_ConcurrentMigrateDir_Serializes(t *testing.T) {
+	m1 := newMySQLManager(t)
+	m2 := newMySQLManager(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "2026-05-19-22-00-a.sql"), `-- migrate:up
+CREATE TABLE a (id INT PRIMARY KEY);`)
+	writeFile(t, filepath.Join(dir, "2026-05-19-22-01-b.sql"), `-- migrate:up
+CREATE TABLE b (id INT PRIMARY KEY);`)
+	writeFile(t, filepath.Join(dir, "2026-05-19-22-02-c.sql"), `-- migrate:up
+CREATE TABLE c (id INT PRIMARY KEY);`)
+
+	var wg sync.WaitGroup
+	var err1, err2 error
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		err1 = m1.MigrateDir(ctx, "default", dir, "")
+	}()
+	go func() {
+		defer wg.Done()
+		err2 = m2.MigrateDir(ctx, "default", dir, "")
+	}()
+	wg.Wait()
+	if err1 != nil {
+		t.Fatalf("first MigrateDir failed: %v", err1)
+	}
+	if err2 != nil {
+		t.Fatalf("second MigrateDir failed: %v", err2)
+	}
+
+	// Verify no duplicate migration records
+	db, _ := m1.GetConnection("default")
+	var count int
+	db.Raw("SELECT count(*) FROM dbro_migrations").Scan(&count)
+	if count != 3 {
+		t.Fatalf("expected 3 migration records, got %d", count)
 	}
 }
 

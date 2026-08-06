@@ -2,6 +2,7 @@ package dbro
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -34,8 +35,42 @@ func runStatements(ctx context.Context, db *gorm.DB, statements []string, filePa
 	return execFn(db.WithContext(ctx))
 }
 
+// withLock acquires a database-level lock for the named connection, runs fn,
+// and releases the lock. If locking is disabled, fn runs directly.
+// If both fn and unlock return errors, they are joined via errors.Join so
+// neither is silently lost.
+func (m *ConnectionManager) withLock(ctx context.Context, name string, fn func() error) (fnErr error) {
+	if !m.lockEnabled.Load() {
+		return fn()
+	}
+	lock, err := m.newLock(ctx, name)
+	if err != nil {
+		return fmt.Errorf("create migration lock: %w", err)
+	}
+	if err := lock.Lock(ctx); err != nil {
+		return fmt.Errorf("acquire migration lock: %w", err)
+	}
+
+	defer func() {
+		unlockErr := lock.Unlock(context.WithoutCancel(ctx))
+		fnErr = errors.Join(fnErr, unlockErr)
+	}()
+
+	fnErr = fn()
+	return
+}
+
 // MigrateUp applies the up block of a single migration file and records it.
+// This method acquires a database-level lock.
 func (m *ConnectionManager) MigrateUp(ctx context.Context, name, filePath string) error {
+	return m.withLock(ctx, name, func() error {
+		return m.migrateUpLocked(ctx, name, filePath)
+	})
+}
+
+// migrateUpLocked applies the up block without acquiring a database lock.
+// The caller MUST hold the database lock (or have locking disabled).
+func (m *ConnectionManager) migrateUpLocked(ctx context.Context, name, filePath string) error {
 	if err := m.ensureMigrationsTable(ctx, name); err != nil {
 		return fmt.Errorf("ensure migrations table: %w", err)
 	}
@@ -89,7 +124,16 @@ func (m *ConnectionManager) MigrateUp(ctx context.Context, name, filePath string
 }
 
 // MigrateDown reverts the down block of a single migration file and removes its record.
+// This method acquires a database-level lock.
 func (m *ConnectionManager) MigrateDown(ctx context.Context, name, filePath string) error {
+	return m.withLock(ctx, name, func() error {
+		return m.migrateDownLocked(ctx, name, filePath)
+	})
+}
+
+// migrateDownLocked reverts the down block without acquiring a database lock.
+// The caller MUST hold the database lock (or have locking disabled).
+func (m *ConnectionManager) migrateDownLocked(ctx context.Context, name, filePath string) error {
 	if err := m.ensureMigrationsTable(ctx, name); err != nil {
 		return fmt.Errorf("ensure migrations table: %w", err)
 	}
@@ -193,7 +237,16 @@ func (m *ConnectionManager) MigrateDownOnce(ctx context.Context, name, filePath 
 
 // MigrateDir orchestrates migrations in a directory based on a target version.
 // targetVersion follows the rules documented in the migration plan.
+// This method acquires a database-level lock for the entire directory run.
 func (m *ConnectionManager) MigrateDir(ctx context.Context, name, dirPath string, targetVersion string) error {
+	return m.withLock(ctx, name, func() error {
+		return m.migrateDirLocked(ctx, name, dirPath, targetVersion)
+	})
+}
+
+// migrateDirLocked orchestrates directory migrations without acquiring a database lock.
+// The caller MUST hold the database lock (or have locking disabled).
+func (m *ConnectionManager) migrateDirLocked(ctx context.Context, name, dirPath string, targetVersion string) error {
 	if err := m.ensureMigrationsTable(ctx, name); err != nil {
 		return fmt.Errorf("ensure migrations table: %w", err)
 	}
@@ -241,7 +294,7 @@ func (m *ConnectionManager) MigrateDir(ctx context.Context, name, dirPath string
 	case targetVersion == "":
 		for _, f := range files {
 			if !appliedSet[f.version] {
-				if err := m.MigrateUp(ctx, name, f.path); err != nil {
+				if err := m.migrateUpLocked(ctx, name, f.path); err != nil {
 					return fmt.Errorf("apply %s: %w", f.path, err)
 				}
 			}
@@ -250,7 +303,7 @@ func (m *ConnectionManager) MigrateDir(ctx context.Context, name, dirPath string
 	case targetVersion == "zero":
 		for i := len(files) - 1; i >= 0; i-- {
 			if appliedSet[files[i].version] {
-				if err := m.MigrateDown(ctx, name, files[i].path); err != nil {
+				if err := m.migrateDownLocked(ctx, name, files[i].path); err != nil {
 					return fmt.Errorf("revert %s: %w", files[i].path, err)
 				}
 			}
@@ -265,7 +318,7 @@ func (m *ConnectionManager) MigrateDir(ctx context.Context, name, dirPath string
 		if targetVer.After(maxApplied) || targetVer.Equal(maxApplied) {
 			for _, f := range files {
 				if !appliedSet[f.version] && (f.version.Before(targetVer) || f.version.Equal(targetVer)) {
-					if err := m.MigrateUp(ctx, name, f.path); err != nil {
+					if err := m.migrateUpLocked(ctx, name, f.path); err != nil {
 						return fmt.Errorf("apply %s: %w", f.path, err)
 					}
 				}
@@ -273,7 +326,7 @@ func (m *ConnectionManager) MigrateDir(ctx context.Context, name, dirPath string
 		} else {
 			for i := len(files) - 1; i >= 0; i-- {
 				if appliedSet[files[i].version] && files[i].version.After(targetVer) {
-					if err := m.MigrateDown(ctx, name, files[i].path); err != nil {
+					if err := m.migrateDownLocked(ctx, name, files[i].path); err != nil {
 						return fmt.Errorf("revert %s: %w", files[i].path, err)
 					}
 				}
